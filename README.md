@@ -4,7 +4,7 @@
 [![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#-setup)
 [![Local-first](https://img.shields.io/badge/local--first-no%20cloud%2C%20no%20DB-brightgreen.svg)](#-how-it-works)
 
-A local-first daily notes + task board + personal wiki, kept up to date automatically by a scheduled AI task instead of by hand.
+A productivity app for Macs inspired by Karpathy's [llm wiki second brain](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). It's a daily notes + task board + personal wiki, all local, kept up to date automatically by a scheduled AI task instead of by hand.
 
 You write freeform notes into a daily canvas throughout the day. Once a day (and once a week), an AI assistant reads that canvas — plus, optionally, your team chat and meeting-transcript tools — and turns it into:
 
