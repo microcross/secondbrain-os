@@ -1,8 +1,8 @@
 {
-  "name": "knowledge-base",
-  "productName": "Knowledge Base",
+  "name": "secondbrain-os",
+  "productName": "Second Brain OS",
   "version": "1.0.0",
-  "description": "Local daily canvas + kanban productivity app",
+  "description": "Local-first daily notes, kanban board, and personal wiki, kept up to date by a scheduled AI task",
   "license": "MIT",
   "main": "main.js",
   "scripts": {
@@ -18,8 +18,8 @@
     "electron-builder": "^25.1.8"
   },
   "build": {
-    "appId": "com.example.knowledge-base",
-    "productName": "Knowledge Base",
+    "appId": "com.example.secondbrain-os",
+    "productName": "Second Brain OS",
     "directories": {
       "output": "dist"
     },

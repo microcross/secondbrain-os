@@ -1,4 +1,4 @@
-# Knowledge Base
+# Second Brain OS
 
 A local-first daily notes + task board + personal wiki, kept up to date automatically by a scheduled AI task instead of by hand.
 
