@@ -1,0 +1,28 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+
+# Your actual notes/tasks/wiki content is personal — keep the folder
+# structure (via .gitkeep) but never commit real entries.
+data/daily/*.md
+data/organized/*.md
+data/wiki/projects/*.md
+data/wiki/people/*.md
+data/wiki/decisions/*.md
+data/wiki/topics/*.md
+data/tasks.json.bak*
+data/tasks.json.new
+data/tasks.fixed.json
+data/*-failed.md
+
+!data/**/.gitkeep
+!data/wiki/index.md
+!data/wiki/log.md
+!data/wiki/questions.md
+
+# Your personalized copies of the scheduled-task templates (see CUSTOMIZE.md) —
+# these will contain your real name, channels, project names, etc. Only the
+# *.template.md files (placeholders, no personal data) are meant to be committed.
+scheduled-prompts/daily-organize.md
+scheduled-prompts/weekly-brief.md

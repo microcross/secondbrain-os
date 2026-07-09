@@ -1,0 +1,40 @@
+{
+  "name": "knowledge-base",
+  "productName": "Knowledge Base",
+  "version": "1.0.0",
+  "description": "Local daily canvas + kanban productivity app",
+  "license": "MIT",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "server": "node server.js",
+    "package": "electron-builder --mac --dir"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "electron": "^41.3.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.example.knowledge-base",
+    "productName": "Knowledge Base",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "server.js",
+      "public/**",
+      "assets/**",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "assets/icon.icns",
+      "target": "dir",
+      "identity": null
+    }
+  }
+}
