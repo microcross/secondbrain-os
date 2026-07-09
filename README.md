@@ -1,5 +1,9 @@
 # Second Brain OS
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#-setup)
+[![Local-first](https://img.shields.io/badge/local--first-no%20cloud%2C%20no%20DB-brightgreen.svg)](#-how-it-works)
+
 A local-first daily notes + task board + personal wiki, kept up to date automatically by a scheduled AI task instead of by hand.
 
 You write freeform notes into a daily canvas throughout the day. Once a day (and once a week), an AI assistant reads that canvas — plus, optionally, your team chat and meeting-transcript tools — and turns it into:
@@ -13,7 +17,15 @@ Everything lives as plain Markdown/JSON files on your disk — no external datab
 
 This repo is a **blank-slate template**: no sample notes, no pre-filled wiki, nothing personalized. You bring your own data (it accumulates as you use it) and fill in a couple of placeholders to point the scheduled tasks at your own name, tools, and team-chat channels.
 
-## How it works
+## Contents
+
+- [How it works](#-how-it-works)
+- [Setup](#-setup)
+- [Scheduling](#-scheduling)
+- [Notes on .gitignore](#-notes-on-gitignore)
+- [License](#-license)
+
+## 🧠 How it works
 
 ```
 app.js / public/          Electron renderer + browser UI (canvas editor, kanban board, wiki viewer, chat)
@@ -30,7 +42,7 @@ scheduled-prompts/        Templates for the two recurring AI tasks (see below)
 
 The app itself never calls out to an AI model — it's just the notes/board/wiki editor and a small local chat endpoint that shells out to a CLI (see `server.js`, "Chat API") if one is installed. The actual organizing intelligence lives in the two prompts under `scheduled-prompts/`, which you run on a schedule with whatever AI assistant you use.
 
-## Setup
+## 🚀 Setup
 
 Requires Node.js 18+.
 
@@ -53,7 +65,7 @@ const MY_NAMES = ['me'];
 
 Add whatever names/aliases you use to refer to yourself in action items (e.g. `'jane'`, `'jd'`) — this is how the board decides whether an extracted action item is yours.
 
-## Scheduling
+## ⏰ Scheduling
 
 The two prompts that do the actual organizing are in `scheduled-prompts/`:
 
@@ -79,10 +91,10 @@ Whatever you use, the task needs:
 - Network access to `http://localhost:3456` if you want it to file tasks through the running app's API (optional — it falls back to writing `data/tasks.json` directly)
 - Chat and/or meeting-notes connector access (optional — the daily prompt skips those sections gracefully if unavailable)
 
-## Notes on `.gitignore`
+## 🗂️ Notes on `.gitignore`
 
 Your actual notes, digests, and wiki pages are personal — the `.gitignore` keeps the folder structure (via `.gitkeep`) but excludes real content, so cloning this repo always starts blank. Your personalized `scheduled-prompts/*.md` (the filled-in versions, as opposed to the `.template.md` files) are also excluded, since they'll contain your real name and channel names.
 
-## License
+## 📄 License
 
 MIT — see [LICENSE](LICENSE).
