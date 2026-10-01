@@ -6,9 +6,11 @@ const { spawn } = require('child_process');
 const app = express();
 const PORT = 3456;
 
-// Resolved relative to this file so the data directory is found regardless
-// of the current working directory or where the project is checked out.
-const DATA_DIR = path.join(__dirname, 'data');
+// SECONDBRAIN_DATA_DIR lets the data live outside the code (the Electron app
+// sets it to ~/Documents/SecondBrain, since a packaged .app is read-only).
+// Otherwise it's resolved relative to this file so the data directory is found
+// regardless of the current working directory or where the project is checked out.
+const DATA_DIR = process.env.SECONDBRAIN_DATA_DIR || path.join(__dirname, 'data');
 const DAILY_DIR = path.join(DATA_DIR, 'daily');
 const ORGANIZED_DIR = path.join(DATA_DIR, 'organized');
 const WIKI_DIR = path.join(DATA_DIR, 'wiki');
@@ -126,6 +128,23 @@ app.put('/api/organized/:date', (req, res) => {
 
 // --- Wiki API ---
 
+// Derive a display title from a wiki page's content: strip any YAML
+// frontmatter block, then use its `title:` field if present, otherwise the
+// first non-blank line (typically a `# Heading`).
+function extractTitle(content, fallback) {
+  let body = content;
+  const fm = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+  if (fm) {
+    const titleLine = fm[1].split('\n').find(l => /^title:/i.test(l.trim()));
+    if (titleLine) {
+      return titleLine.replace(/^title:\s*/i, '').trim().replace(/^["']|["']$/g, '') || fallback;
+    }
+    body = content.slice(fm[0].length);
+  }
+  const firstLine = body.split('\n').find(l => l.trim()) || '';
+  return firstLine.replace(/^#+\s*/, '') || fallback;
+}
+
 // List all wiki pages
 app.get('/api/wiki', (req, res) => {
   const pages = [];
@@ -137,8 +156,7 @@ app.get('/api/wiki', (req, res) => {
       } else if (entry.name.endsWith('.md')) {
         const slug = prefix ? `${prefix}/${entry.name.replace('.md', '')}` : entry.name.replace('.md', '');
         const content = fs.readFileSync(path.join(dir, entry.name), 'utf8');
-        const firstLine = content.split('\n').find(l => l.trim()) || '';
-        const title = firstLine.replace(/^#+\s*/, '') || slug;
+        const title = extractTitle(content, slug);
         pages.push({ slug, title, size: content.length });
       }
     }
@@ -165,8 +183,7 @@ app.get('/api/wiki/:slug(*)', (req, res) => {
           if (otherSlug === slug) return;
           const otherContent = fs.readFileSync(path.join(dir, entry.name), 'utf8');
           if (otherContent.includes(`[[${slug}]]`) || otherContent.includes(`(${slug})`) || otherContent.includes(`${slug}.md`)) {
-            const firstLine = otherContent.split('\n').find(l => l.trim()) || '';
-            backlinks.push({ slug: otherSlug, title: firstLine.replace(/^#+\s*/, '') || otherSlug });
+            backlinks.push({ slug: otherSlug, title: extractTitle(otherContent, otherSlug) });
           }
         }
       }
@@ -425,8 +442,7 @@ app.get('/api/search', (req, res) => {
           const lower = content.toLowerCase();
           if (terms.every(t => lower.includes(t))) {
             const lines = content.split('\n');
-            const firstLine = lines.find(l => l.trim()) || '';
-            const title = firstLine.replace(/^#+\s*/, '') || slug;
+            const title = extractTitle(content, slug);
             const matches = lines.filter(l => terms.some(t => l.toLowerCase().includes(t)));
             results.push({
               type: 'wiki',
