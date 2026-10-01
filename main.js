@@ -2,6 +2,12 @@
 
 const { app, BrowserWindow, Tray, Menu, nativeImage, shell } = require('electron');
 const path = require('path');
+const os = require('os');
+
+// Notes, tasks and wiki live in a plain folder outside the app bundle so the
+// packaged .app can write to them and other tools (Obsidian, the scheduled AI
+// prompts) can read them. Must be set before server.js is required.
+process.env.SECONDBRAIN_DATA_DIR ||= path.join(os.homedir(), 'Documents', 'SecondBrain');
 
 // Single-instance lock: if a second instance is launched (e.g. via the Dock
 // launcher while already running), quit the newcomer and show the window in
