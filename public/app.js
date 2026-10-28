@@ -73,8 +73,13 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // --- Helpers ---
+// Local calendar date (not UTC), so evening notes land in today's file.
+function localDateStr(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 function todayStr() {
-  return new Date().toISOString().slice(0, 10);
+  return localDateStr(new Date());
 }
 
 function formatDate(dateStr) {
@@ -85,7 +90,28 @@ function formatDate(dateStr) {
 function shiftDate(dateStr, days) {
   const d = new Date(dateStr + 'T12:00:00');
   d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
+  return localDateStr(d);
+}
+
+// Swap an editor's text (e.g. after merging changes from disk) while keeping the
+// cursor and scroll position in place relative to the user's own text.
+function replaceEditorText(editor, text) {
+  const old = editor.value;
+  let p = 0;
+  while (p < old.length && p < text.length && old[p] === text[p]) p++;
+  const shift = text.length - old.length;
+  const map = i => (i <= p ? i : Math.max(p, i + shift));
+  const start = map(editor.selectionStart), end = map(editor.selectionEnd), top = editor.scrollTop;
+  editor.value = text;
+  editor.setSelectionRange(start, end);
+  editor.scrollTop = top;
+}
+
+const CONFLICT_PROMPT = 'This file changed on disk and your edits overlap those changes, so nothing was saved.\n\n' +
+  'OK: load the version on disk with your text pasted below a divider (nothing is lost).\nCancel: keep your text as is, unsaved.';
+
+function conflictText(theirs, mine) {
+  return theirs.replace(/\n*$/, '\n') + `\n---------- my unsaved edits (conflict at ${new Date().toLocaleTimeString()}) ----------\n` + mine;
 }
 
 // --- Navigation ---
@@ -118,6 +144,9 @@ function setupCanvasNav() {
 }
 
 let canvasOrgContent = '';
+let canvasVersion = null;
+let canvasConflictAsked = false;
+let canvasOrgVersion = null;
 
 async function loadCanvas(date) {
   currentCanvasDate = date;
@@ -141,7 +170,10 @@ async function loadCanvas(date) {
     editor.value = `(No log for ${date})`;
   }
   canvasContent = editor.value;
+  canvasVersion = data.version ?? null;
+  canvasConflictAsked = false;
   canvasOrgContent = orgData.exists ? orgData.content : '';
+  canvasOrgVersion = orgData.version ?? null;
 
   document.getElementById('canvas-title').textContent = isToday ? "Today's Canvas" : `Canvas — ${date}`;
 
@@ -238,17 +270,30 @@ async function saveOrgNotes() {
     const res = await fetch(`/api/organized/${currentCanvasDate}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: newContent })
+      body: JSON.stringify({ content: newContent, baseVersion: canvasOrgVersion, baseContent: canvasOrgContent })
     });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 409) {
+      if (body.conflict && confirm(CONFLICT_PROMPT)) {
+        canvasOrgContent = body.theirs;
+        canvasOrgVersion = body.version ?? null;
+        orgEditor.value = conflictText(body.theirs, newContent);
+        orgStatus.textContent = 'Disk version loaded with your text below the divider. Tidy up, then Save.';
+      } else {
+        orgStatus.textContent = 'Not saved: changed on disk. Copy your edits, then reload.';
+      }
+      return;
+    }
     if (!res.ok) throw new Error('Save failed');
 
-    canvasOrgContent = newContent;
+    canvasOrgContent = body.merged ? body.content : newContent;
+    canvasOrgVersion = body.version ?? null;
     orgEditor.style.display = 'none';
     orgViewer.style.display = 'block';
     orgViewer.innerHTML = marked.parse(canvasOrgContent);
     btnEdit.textContent = 'Edit';
     btnSave.style.display = 'none';
-    orgStatus.textContent = 'Saved';
+    orgStatus.textContent = body.merged ? 'Merged changes from disk' : 'Saved';
     setTimeout(() => { orgStatus.textContent = ''; }, 2000);
   } catch (e) {
     orgStatus.textContent = 'Save failed';
@@ -263,13 +308,48 @@ function handleCanvasInput() {
 
 async function saveCanvas() {
   const editor = document.getElementById('canvas-editor');
-  await fetch(`/api/canvas/${currentCanvasDate}`, {
+  const mine = editor.value;
+  const res = await fetch(`/api/canvas/${currentCanvasDate}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content: editor.value })
+    body: JSON.stringify({ content: mine, baseVersion: canvasVersion, baseContent: canvasContent })
   });
-  canvasContent = editor.value;
-  updateSaveStatus('Saved');
+  const body = await res.json().catch(() => ({}));
+  if (res.status === 409) {
+    // Ask once per conflict; autosave keeps retrying (and failing) until resolved.
+    if (body.conflict && !canvasConflictAsked) {
+      canvasConflictAsked = true;
+      if (confirm(CONFLICT_PROMPT)) {
+        canvasContent = body.theirs;
+        canvasVersion = body.version ?? null;
+        replaceEditorText(editor, conflictText(body.theirs, editor.value));
+        canvasConflictAsked = false;
+        handleCanvasInput();
+        return;
+      }
+    }
+    updateSaveStatus('Not saved: your edits overlap changes on disk. Copy your text, then click Today to reload.');
+    return;
+  }
+  if (!res.ok) {
+    updateSaveStatus('Save failed');
+    return;
+  }
+  canvasVersion = body.version ?? null;
+  if (!body.merged) {
+    canvasContent = mine;
+    updateSaveStatus('Saved');
+  } else if (editor.value === mine) {
+    canvasContent = body.content;
+    replaceEditorText(editor, body.content);
+    updateSaveStatus('Merged changes from disk');
+  } else {
+    // User typed while saving: treat what was sent as the base and force the
+    // next autosave to merge again, so the disk changes aren't overwritten.
+    canvasContent = mine;
+    canvasVersion = 'stale';
+    updateSaveStatus('Merged changes from disk');
+  }
   setTimeout(() => updateSaveStatus(''), 2000);
 }
 
@@ -297,7 +377,7 @@ function insertTemplate(type) {
 
 // Name variants that all refer to you. Add any nicknames/aliases you use for
 // yourself in the canvas or action items (e.g. your first name, initials).
-const MY_NAMES = ['me'];
+const MY_NAMES = ['me', 'michael', 'michael cross'];
 
 function isMyTask(assignee) {
   if (!assignee) return true; // no name = treat as mine
@@ -353,6 +433,13 @@ async function extractActions() {
 // --- Kanban ---
 async function loadTasks() {
   const res = await fetch('/api/tasks');
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    tasks = [];
+    document.getElementById('kanban-board').innerHTML =
+      `<div style="padding:16px;color:#e5534b;white-space:pre-wrap">⚠ Tasks not loaded: ${escapeHtml(err.error || `server error ${res.status}`)}</div>`;
+    return;
+  }
   tasks = await res.json();
   renderBoard();
 }
@@ -758,6 +845,8 @@ function escapeHtml(str) {
 
 // --- Wiki ---
 let currentWikiSlug = null;
+let currentWikiVersion = null;
+let currentWikiBase = '';
 let wikiPages = [];
 
 async function loadWikiIndex() {
@@ -858,6 +947,8 @@ async function loadWikiPage(slug) {
   currentWikiSlug = slug;
   const res = await fetch(`/api/wiki/${slug}`);
   const data = await res.json();
+  currentWikiVersion = data.version ?? null;
+  currentWikiBase = data.exists ? data.content : '';
 
   renderWikiSidebar();
 
@@ -944,11 +1035,26 @@ async function saveWikiPage() {
   if (!currentWikiSlug) return;
   const editor = document.getElementById('wiki-editor');
 
-  await fetch(`/api/wiki/${currentWikiSlug}`, {
+  const res = await fetch(`/api/wiki/${currentWikiSlug}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content: editor.value })
+    body: JSON.stringify({ content: editor.value, baseVersion: currentWikiVersion, baseContent: currentWikiBase })
   });
+  const body = await res.json().catch(() => ({}));
+  if (res.status === 409 && body.conflict) {
+    if (confirm(CONFLICT_PROMPT)) {
+      currentWikiBase = body.theirs;
+      currentWikiVersion = body.version ?? null;
+      editor.value = conflictText(body.theirs, editor.value);
+      alert('Loaded the version on disk with your text below the divider. Tidy up, then click Save.');
+    }
+    return;
+  }
+  if (!res.ok) {
+    alert(`Not saved: ${body.error || `server error ${res.status}`}\n\nCopy your edits, then reopen the page.`);
+    return;
+  }
+  if (body.merged) alert('Saved. Changes made on disk since you opened this page were merged in.');
 
   // Reload page and index
   await loadWikiIndex();

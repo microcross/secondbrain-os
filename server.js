@@ -2,6 +2,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = 3456;
@@ -21,20 +22,157 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // --- Helpers ---
 
+// Local calendar date (not UTC), so evening notes land in today's file.
 function todayStr() {
-  return new Date().toISOString().slice(0, 10);
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// A missing file starts from `fallback`. A file that exists but can't be read
+// or parsed throws, so callers never overwrite real data with the fallback.
 function readJSON(file, fallback) {
+  let raw;
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return fallback;
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') return fallback;
+    throw dataFileError(file, e);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    throw dataFileError(file, e);
+  }
+}
+
+function dataFileError(file, cause) {
+  const err = new Error(`${path.basename(file)} exists but could not be read (${cause.message}). ` +
+    `Refusing to save so it isn't overwritten. Fix or restore ${file} (Syncthing keeps old copies in .stversions), then reload.`);
+  err.status = 500;
+  err.code = 'DATA_FILE_UNREADABLE';
+  return err;
+}
+
+// Write to a temp file in the same directory, then rename over the target, so
+// a crash or a concurrent reader (Syncthing) never sees a half-written file.
+function writeFileAtomic(file, content) {
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
+  try {
+    fs.writeFileSync(tmp, content, 'utf8');
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch {}
+    throw e;
   }
 }
 
 function writeJSON(file, data) {
-  fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
+  writeFileAtomic(file, JSON.stringify(data, null, 2));
+}
+
+// Content hash used to detect edits made on disk (e.g. by Syncthing) between
+// an editor loading a file and saving it. null = file doesn't exist.
+function fileVersion(file) {
+  if (!fs.existsSync(file)) return null;
+  return crypto.createHash('sha1').update(fs.readFileSync(file)).digest('hex');
+}
+
+// Decide what an editor save should write. If the client sent `baseVersion` and
+// the file changed on disk since it was loaded, three-way merge the client's
+// `baseContent` (as loaded), `content` (its edits) and the current disk text.
+// Returns { content, merged } to write, or null after sending a 409 when the
+// edits overlap. Callers that don't send `baseVersion` (scripts, scheduled
+// tasks) write as before.
+function contentToSave(req, res, file) {
+  const body = req.body || {};
+  if (!('baseVersion' in body)) return { content: body.content, merged: false };
+  const diskVersion = fileVersion(file);
+  if (diskVersion === body.baseVersion) return { content: body.content, merged: false };
+  const theirs = diskVersion === null ? '' : fs.readFileSync(file, 'utf8');
+  if (typeof body.baseContent === 'string' && typeof body.content === 'string') {
+    const merged = merge3(body.baseContent, body.content, theirs);
+    if (merged !== null) return { content: merged, merged: true };
+  }
+  res.status(409).json({
+    error: 'This file changed on disk since you opened it, and your edits overlap those changes. Nothing was saved.',
+    code: 'CHANGED_ON_DISK', conflict: true, theirs, version: diskVersion,
+  });
+  return null;
+}
+
+function sendSaved(res, file, save) {
+  res.json({ ok: true, version: fileVersion(file), merged: save.merged, content: save.merged ? save.content : undefined });
+}
+
+// --- Three-way merge (line-based diff3) ---
+
+// Hunks that turn `base` lines into `other` lines: base[s..e) is replaced by `lines`.
+function lineHunks(base, other) {
+  let pre = 0;
+  while (pre < base.length && pre < other.length && base[pre] === other[pre]) pre++;
+  let suf = 0;
+  while (suf < base.length - pre && suf < other.length - pre &&
+         base[base.length - 1 - suf] === other[other.length - 1 - suf]) suf++;
+  const a = base.slice(pre, base.length - suf), b = other.slice(pre, other.length - suf);
+  const n = a.length, m = b.length;
+  if (n === 0 && m === 0) return [];
+  // Too large to diff line-by-line: treat the whole middle as one change (merges conservatively).
+  if ((n + 1) * (m + 1) > 4e6) return [{ s: pre, e: pre + n, lines: b }];
+  const w = m + 1;
+  const L = new Uint32Array((n + 1) * w); // LCS lengths of a[i..], b[j..]
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      L[i * w + j] = a[i] === b[j] ? L[(i + 1) * w + j + 1] + 1 : Math.max(L[(i + 1) * w + j], L[i * w + j + 1]);
+    }
+  }
+  const hunks = [];
+  let i = 0, j = 0, cur = null;
+  while (i < n || j < m) {
+    if (i < n && j < m && a[i] === b[j]) { cur = null; i++; j++; continue; }
+    if (!cur) { cur = { s: pre + i, e: pre + i, lines: [] }; hunks.push(cur); }
+    if (j < m && (i === n || L[i * w + j + 1] >= L[(i + 1) * w + j])) cur.lines.push(b[j++]);
+    else cur.e = pre + ++i;
+  }
+  return hunks;
+}
+
+function applyHunks(base, lo, hi, hunks) {
+  const out = [];
+  let p = lo;
+  for (const h of hunks) { out.push(...base.slice(p, h.s), ...h.lines); p = h.e; }
+  out.push(...base.slice(p, hi));
+  return out;
+}
+
+// Merged text, or null when both sides changed the same or adjacent lines differently.
+function merge3(baseText, mineText, theirsText) {
+  if (mineText === theirsText || baseText === theirsText) return mineText;
+  if (baseText === mineText) return theirsText;
+  const base = baseText.split('\n');
+  const tagged = [
+    ...lineHunks(base, mineText.split('\n')).map(h => ({ ...h, side: 0 })),
+    ...lineHunks(base, theirsText.split('\n')).map(h => ({ ...h, side: 1 })),
+  ].sort((x, y) => x.s - y.s || x.e - y.e);
+  const out = [];
+  let pos = 0;
+  for (let k = 0; k < tagged.length;) {
+    const group = [tagged[k]];
+    const lo = tagged[k].s;
+    let hi = tagged[k++].e;
+    while (k < tagged.length && tagged[k].s <= hi) { hi = Math.max(hi, tagged[k].e); group.push(tagged[k++]); }
+    const mine = group.filter(h => h.side === 0), theirs = group.filter(h => h.side === 1);
+    let text;
+    if (!theirs.length) text = applyHunks(base, lo, hi, mine);
+    else if (!mine.length) text = applyHunks(base, lo, hi, theirs);
+    else {
+      text = applyHunks(base, lo, hi, mine);
+      if (text.join('\n') !== applyHunks(base, lo, hi, theirs).join('\n')) return null;
+    }
+    out.push(...base.slice(pos, lo), ...text);
+    pos = hi;
+  }
+  out.push(...base.slice(pos));
+  return out.join('\n');
 }
 
 // Ensure every task has an `order` field within its column. Seeded from current
@@ -80,13 +218,13 @@ app.get('/api/canvas/:date?', (req, res) => {
   const file = path.join(DAILY_DIR, `${date}.md`);
 
   if (fs.existsSync(file)) {
-    return res.json({ date, content: fs.readFileSync(file, 'utf8'), exists: true });
+    return res.json({ date, content: fs.readFileSync(file, 'utf8'), exists: true, version: fileVersion(file) });
   }
 
   if (date === todayStr()) {
     const header = `# Daily Log — ${date}\n\n`;
     fs.writeFileSync(file, header, 'utf8');
-    return res.json({ date, content: header, exists: true });
+    return res.json({ date, content: header, exists: true, version: fileVersion(file) });
   }
 
   res.json({ date, content: '', exists: false });
@@ -96,8 +234,10 @@ app.get('/api/canvas/:date?', (req, res) => {
 app.put('/api/canvas/:date?', (req, res) => {
   const date = req.params.date || todayStr();
   const file = path.join(DAILY_DIR, `${date}.md`);
-  fs.writeFileSync(file, req.body.content, 'utf8');
-  res.json({ ok: true });
+  const save = contentToSave(req, res, file);
+  if (!save) return;
+  writeFileAtomic(file, save.content);
+  sendSaved(res, file, save);
 });
 
 // List all canvas dates
@@ -114,16 +254,18 @@ app.get('/api/canvas-list', (req, res) => {
 app.get('/api/organized/:date', (req, res) => {
   const file = path.join(ORGANIZED_DIR, `${req.params.date}.md`);
   if (fs.existsSync(file)) {
-    return res.json({ date: req.params.date, content: fs.readFileSync(file, 'utf8'), exists: true });
+    return res.json({ date: req.params.date, content: fs.readFileSync(file, 'utf8'), exists: true, version: fileVersion(file) });
   }
-  res.json({ date: req.params.date, content: '', exists: false });
+  res.json({ date: req.params.date, content: '', exists: false, version: null });
 });
 
 // Save organized version (used by Claude's scheduled task)
 app.put('/api/organized/:date', (req, res) => {
   const file = path.join(ORGANIZED_DIR, `${req.params.date}.md`);
-  fs.writeFileSync(file, req.body.content, 'utf8');
-  res.json({ ok: true });
+  const save = contentToSave(req, res, file);
+  if (!save) return;
+  writeFileAtomic(file, save.content);
+  sendSaved(res, file, save);
 });
 
 // --- Wiki API ---
@@ -189,9 +331,9 @@ app.get('/api/wiki/:slug(*)', (req, res) => {
       }
     }
     scanLinks(WIKI_DIR, '');
-    return res.json({ slug, content, exists: true, backlinks });
+    return res.json({ slug, content, exists: true, backlinks, version: fileVersion(file) });
   }
-  res.json({ slug, content: '', exists: false, backlinks: [] });
+  res.json({ slug, content: '', exists: false, backlinks: [], version: null });
 });
 
 // Create or update a wiki page
@@ -200,8 +342,10 @@ app.put('/api/wiki/:slug(*)', (req, res) => {
   const file = path.join(WIKI_DIR, `${slug}.md`);
   const dir = path.dirname(file);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(file, req.body.content, 'utf8');
-  res.json({ ok: true });
+  const save = contentToSave(req, res, file);
+  if (!save) return;
+  writeFileAtomic(file, save.content);
+  sendSaved(res, file, save);
 });
 
 // Delete a wiki page
@@ -358,7 +502,7 @@ function readQuestionsFile() {
 
 function writeQuestionsFile(prefix, questions) {
   const out = serializeQuestions(prefix, questions);
-  fs.writeFileSync(QUESTIONS_FILE, out, 'utf8');
+  writeFileAtomic(QUESTIONS_FILE, out);
 }
 
 // GET /api/questions — return all parsed questions plus prefix + any unparseable raw blocks.
@@ -985,6 +1129,12 @@ app.post('/api/chat', (req, res) => {
 
   child.stdin.write(prompt);
   child.stdin.end();
+});
+
+// Errors thrown in route handlers (e.g. an unreadable tasks.json) come back as JSON.
+app.use((err, req, res, next) => {
+  console.error('[api error]', req.method, req.path, err.message);
+  res.status(err.status || 500).json({ error: err.message, code: err.code });
 });
 
 // --- Start ---
